@@ -26,10 +26,15 @@ Supported file formats:
 - .py (Python source code)
 - .js (JavaScript source code)
 
+Chunking strategies:
+- Character-based: Fixed-size chunks with character boundaries (default)
+- Semantic: Intelligent splitting on paragraphs, sections, and natural boundaries
+
 Examples:
   edgerag index ./docs
   edgerag index file.txt
-  edgerag index . --recursive`,
+  edgerag index . --recursive
+  edgerag index docs/ --semantic --chunk-size 800`,
 	Args: cobra.ExactArgs(1),
 	RunE: runIndex,
 }
@@ -41,6 +46,7 @@ func init() {
 	indexCmd.Flags().StringSliceP("extensions", "e", []string{".txt", ".md", ".go", ".py", ".js"}, "File extensions to index")
 	indexCmd.Flags().IntP("chunk-size", "c", 200, "Maximum chunk size for document splitting")
 	indexCmd.Flags().IntP("chunk-overlap", "o", 50, "Overlap between chunks when splitting documents")
+	indexCmd.Flags().BoolP("semantic", "s", false, "Use semantic chunking (split on paragraphs/sections)")
 }
 
 func runIndex(cmd *cobra.Command, args []string) error {
@@ -49,6 +55,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	extensions, _ := cmd.Flags().GetStringSlice("extensions")
 	chunkSize, _ := cmd.Flags().GetInt("chunk-size")
 	chunkOverlap, _ := cmd.Flags().GetInt("chunk-overlap")
+	useSemantic, _ := cmd.Flags().GetBool("semantic")
 
 	// Initialize embedding service
 	model := viper.GetString("model")
@@ -69,6 +76,13 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize vector store: %w", err)
 	}
 	fmt.Printf("✅ Vector store ready (data dir: %s)\n", dataDir)
+	
+	// Show chunking strategy
+	if useSemantic {
+		fmt.Printf("📄 Using semantic chunking (max size: %d chars, overlap: %d chars)\n", chunkSize, chunkOverlap)
+	} else {
+		fmt.Printf("📄 Using character-based chunking (size: %d chars, overlap: %d chars)\n", chunkSize, chunkOverlap)
+	}
 	fmt.Println()
 
 	// Get files to process
@@ -93,7 +107,12 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		fmt.Printf(" ✅ Loaded (%d bytes)\n", len(doc.Content))
 
 		fmt.Printf("  ⏳ Chunking document...")
-		chunks := document.ChunkDocument(doc, chunkSize, chunkOverlap)
+		var chunks []*document.Chunk
+		if useSemantic {
+			chunks = document.ChunkSmartDocument(doc, chunkSize, chunkOverlap)
+		} else {
+			chunks = document.ChunkDocument(doc, chunkSize, chunkOverlap)
+		}
 		fmt.Printf(" ✅ Created %d chunks\n", len(chunks))
 
 		// Generate embeddings for each chunk

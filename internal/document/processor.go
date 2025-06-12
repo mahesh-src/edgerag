@@ -243,4 +243,222 @@ func GetFileType(filename string) string {
 	default:
 		return "text"
 	}
+}
+
+// ChunkSemanticDocument splits a document using semantic boundaries
+func ChunkSemanticDocument(doc *Document, maxChunkSize int, overlap int) []*Chunk {
+	content := doc.Content
+	if len(content) == 0 {
+		return []*Chunk{}
+	}
+
+	var chunks []*Chunk
+	chunkIndex := 0
+
+	// Split by double newlines (paragraphs) first
+	paragraphs := strings.Split(content, "\n\n")
+	
+	var currentChunk strings.Builder
+	var chunkStart int = 0
+	var globalOffset int = 0
+
+	for _, paragraph := range paragraphs {
+		paragraph = strings.TrimSpace(paragraph)
+		if len(paragraph) == 0 {
+			globalOffset += 2 // account for \n\n
+			continue
+		}
+
+		// If adding this paragraph would exceed max size, finalize current chunk
+		if currentChunk.Len() > 0 && currentChunk.Len()+len(paragraph)+2 > maxChunkSize {
+			// Create chunk from current content
+			chunkContent := strings.TrimSpace(currentChunk.String())
+			if len(chunkContent) > 0 {
+				chunk := createChunk(doc, chunkIndex, chunkContent, chunkStart, globalOffset-1)
+				chunks = append(chunks, chunk)
+				chunkIndex++
+			}
+
+			// Start new chunk with overlap
+			currentChunk.Reset()
+			if overlap > 0 && len(chunkContent) > overlap {
+				overlapText := chunkContent[len(chunkContent)-overlap:]
+				currentChunk.WriteString(overlapText)
+				chunkStart = globalOffset - overlap
+			} else {
+				chunkStart = globalOffset
+			}
+		}
+
+		// Add paragraph to current chunk
+		if currentChunk.Len() > 0 {
+			currentChunk.WriteString("\n\n")
+		}
+		currentChunk.WriteString(paragraph)
+		
+		globalOffset += len(paragraph) + 2 // account for \n\n after each paragraph
+	}
+
+	// Add final chunk if there's content
+	if currentChunk.Len() > 0 {
+		chunkContent := strings.TrimSpace(currentChunk.String())
+		if len(chunkContent) > 0 {
+			chunk := createChunk(doc, chunkIndex, chunkContent, chunkStart, globalOffset)
+			chunks = append(chunks, chunk)
+		}
+	}
+
+	return chunks
+}
+
+// ChunkSmartDocument uses intelligent splitting based on content structure
+func ChunkSmartDocument(doc *Document, maxChunkSize int, overlap int) []*Chunk {
+	content := doc.Content
+	if len(content) == 0 {
+		return []*Chunk{}
+	}
+
+	// For markdown files, split on headers first
+	if isMarkdown(doc) {
+		return chunkMarkdownSections(doc, maxChunkSize, overlap)
+	}
+
+	// For other files, use semantic paragraph splitting
+	return ChunkSemanticDocument(doc, maxChunkSize, overlap)
+}
+
+// chunkMarkdownSections splits markdown content on header boundaries
+func chunkMarkdownSections(doc *Document, maxChunkSize int, overlap int) []*Chunk {
+	content := doc.Content
+	lines := strings.Split(content, "\n")
+	
+	var chunks []*Chunk
+	var currentSection strings.Builder
+	var sectionStart int = 0
+	chunkIndex := 0
+	globalOffset := 0
+
+	for _, line := range lines {
+		lineLen := len(line) + 1 // +1 for newline
+		
+		// Check if this is a header (starts with #)
+		isHeader := strings.HasPrefix(strings.TrimSpace(line), "#")
+		
+		// If we hit a header and have content, finalize current section
+		if isHeader && currentSection.Len() > 0 {
+			sectionContent := strings.TrimSpace(currentSection.String())
+			if len(sectionContent) > 0 {
+				// If section is too large, split it further
+				if len(sectionContent) > maxChunkSize {
+					subChunks := splitLargeSection(doc, sectionContent, maxChunkSize, overlap, sectionStart, &chunkIndex)
+					chunks = append(chunks, subChunks...)
+				} else {
+					chunk := createChunk(doc, chunkIndex, sectionContent, sectionStart, globalOffset)
+					chunks = append(chunks, chunk)
+					chunkIndex++
+				}
+			}
+			
+			// Start new section
+			currentSection.Reset()
+			sectionStart = globalOffset
+		}
+		
+		// Add line to current section
+		if currentSection.Len() > 0 {
+			currentSection.WriteString("\n")
+		}
+		currentSection.WriteString(line)
+		globalOffset += lineLen
+	}
+
+	// Add final section
+	if currentSection.Len() > 0 {
+		sectionContent := strings.TrimSpace(currentSection.String())
+		if len(sectionContent) > 0 {
+			if len(sectionContent) > maxChunkSize {
+				subChunks := splitLargeSection(doc, sectionContent, maxChunkSize, overlap, sectionStart, &chunkIndex)
+				chunks = append(chunks, subChunks...)
+			} else {
+				chunk := createChunk(doc, chunkIndex, sectionContent, sectionStart, globalOffset)
+				chunks = append(chunks, chunk)
+			}
+		}
+	}
+
+	return chunks
+}
+
+// splitLargeSection splits a large section into smaller semantic chunks
+func splitLargeSection(doc *Document, content string, maxChunkSize int, overlap int, baseOffset int, chunkIndex *int) []*Chunk {
+	// First try splitting by double newlines (paragraphs)
+	paragraphs := strings.Split(content, "\n\n")
+	var chunks []*Chunk
+	var currentChunk strings.Builder
+	localOffset := 0
+
+	for _, paragraph := range paragraphs {
+		paragraph = strings.TrimSpace(paragraph)
+		if len(paragraph) == 0 {
+			localOffset += 2
+			continue
+		}
+
+		// If adding this paragraph exceeds size, finalize current chunk
+		if currentChunk.Len() > 0 && currentChunk.Len()+len(paragraph)+2 > maxChunkSize {
+			chunkContent := strings.TrimSpace(currentChunk.String())
+			if len(chunkContent) > 0 {
+				chunk := createChunk(doc, *chunkIndex, chunkContent, baseOffset+localOffset-len(chunkContent), baseOffset+localOffset)
+				chunks = append(chunks, chunk)
+				(*chunkIndex)++
+			}
+			currentChunk.Reset()
+		}
+
+		// Add paragraph
+		if currentChunk.Len() > 0 {
+			currentChunk.WriteString("\n\n")
+		}
+		currentChunk.WriteString(paragraph)
+		localOffset += len(paragraph) + 2
+	}
+
+	// Add final chunk
+	if currentChunk.Len() > 0 {
+		chunkContent := strings.TrimSpace(currentChunk.String())
+		if len(chunkContent) > 0 {
+			chunk := createChunk(doc, *chunkIndex, chunkContent, baseOffset+localOffset-len(chunkContent), baseOffset+localOffset)
+			chunks = append(chunks, chunk)
+			(*chunkIndex)++
+		}
+	}
+
+	return chunks
+}
+
+// createChunk helper function to create a chunk with metadata
+func createChunk(doc *Document, chunkIndex int, content string, start, end int) *Chunk {
+	chunkMetadata := make(map[string]interface{})
+	for k, v := range doc.Metadata {
+		chunkMetadata[k] = v
+	}
+	chunkMetadata["chunk_index"] = chunkIndex
+	chunkMetadata["chunk_start"] = start
+	chunkMetadata["chunk_end"] = end
+	chunkMetadata["parent_id"] = doc.ID
+	chunkMetadata["chunk_type"] = "semantic"
+
+	return &Chunk{
+		ID:       fmt.Sprintf("%s_semantic_%d", doc.ID, chunkIndex),
+		Content:  content,
+		Metadata: chunkMetadata,
+	}
+}
+
+// isMarkdown checks if the document is a markdown file
+func isMarkdown(doc *Document) bool {
+	if ext, ok := doc.Metadata["extension"].(string); ok {
+		return ext == ".md" || ext == ".markdown"
+	}
+	return false
 } 
